@@ -110,17 +110,15 @@ for claim_id, graph_wiki in tqdm(eval_graphs_wiki.items()):
         graph_response_embedding = gcn(eval_graphs_response[claim_id])
 
         # Apply the attention model to the embeddings
-        graph_wiki_embedding = attention(graph_wiki_embedding)
-        graph_response_embedding = attention(graph_response_embedding)
+        attn1 = attention(graph_wiki_embedding)
+        attn2 = attention(graph_response_embedding)
 
         #mean
-        graph_wiki_embedding = torch.mean(graph_wiki_embedding, dim=0)
-        graph_response_embedding = torch.mean(graph_response_embedding, dim=0)
-
-        print('####', graph_wiki_embedding, graph_response_embedding, '####')
+        graph_wiki_embedding = torch.mean(attn1*graph_wiki_embedding, dim=0)
+        graph_response_embedding = torch.mean(attn2*graph_response_embedding, dim=0)
         # Compute the cosine similarity of the embeddings
-        similarity = cosine_similarity(graph_wiki_embedding.unsqueeze(0), graph_response_embedding.unsqueeze(0))
-        similarities.append(similarity.item())
+        simi = cosine_similarity(graph_wiki_embedding.unsqueeze(0), graph_response_embedding.unsqueeze(0)).mean().item()
+        similarities.append(simi)
 
 # Compute the average similarity
 average_similarity = sum(similarities) / len(similarities)

@@ -86,7 +86,7 @@ def mask_graph(data, mask_rate=0.15):
     return data
 # Training
 optimizer = optim.Adam(list(gcn.parameters()) + list(attention.parameters()), lr=0.001)
-for epoch in tqdm(range(100)):
+for epoch in tqdm(range(5)):
     for claim_id, graph in train_graphs_wiki_real.items():
         optimizer.zero_grad()
         graph1 = mask_graph(graph)
@@ -97,7 +97,7 @@ for epoch in tqdm(range(100)):
         attn2 = attention(emb2)
         graph_emb1 = torch.mean(attn1 * emb1, dim=0)
         graph_emb2 = torch.mean(attn2 * emb2, dim=0)
-        pos_loss = -cosine_similarity(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0))
+        pos_loss = 1-cosine_similarity(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0))
 
         negative_samples = random.sample(list(train_graphs_wiki_real), 10)
         max_distance = 0
@@ -117,6 +117,7 @@ for epoch in tqdm(range(100)):
         loss = pos_loss + neg_loss
         loss.backward()
         optimizer.step()
+    print(f'Epoch {epoch} loss: {loss.item()}')
 
 # Save the model and optimizer states
 torch.save({
@@ -135,5 +136,26 @@ with torch.no_grad():
         attn2 = attention(emb2)
         graph_emb1 = torch.mean(attn1 * emb1, dim=0)
         graph_emb2 = torch.mean(attn2 * emb2, dim=0)
+
+        negative_samples = random.sample(list(eval_graphs_wiki_real), 10)
+        max_distance = 0
+        max_distance_graph_emb = None
+        for negative_graph in negative_samples:
+            if negative_graph == graph:
+                continue
+            negative_emb = gcn(mask_graph(negative_graph))
+            negative_attn = attention(negative_emb)
+            negative_graph_emb = torch.mean(negative_attn * negative_emb, dim=0)
+            distance = torch.dist(graph_emb1, negative_graph_emb)
+            if distance > max_distance:
+                max_distance = distance
+                max_distance_graph_emb = negative_graph_emb
+        print('distance:', distance)
+        
+        simi = cosine_similarity(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0))
+        semi = cosine_similarity(graph_emb1.unsqueeze(0), max_distance_graph_emb.unsqueeze(0))
+
+        print('simi:', simi, 'semi:', semi)
+
         similarities.append(cosine_similarity(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0)).mean().item())
     print(f'Average similarity: {sum(similarities) / len(similarities)}')
