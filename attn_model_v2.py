@@ -8,9 +8,10 @@ import torch.nn as nn
 from torch_geometric.nn import GCNConv
 from torch_geometric.utils import from_networkx
 import networkx as nx
+from torch.nn.functional import mse_loss
 
 # Load the data
-graph_wiki_real_df = pd.read_csv('graph_wiki_real.csv')
+graph_wiki_real_df = pd.read_csv('graph_wiki.csv')
 
 # Preprocess the data
 graph_wiki_real_df = graph_wiki_real_df.apply(lambda s:s.lower() if type(s) == str else s)
@@ -43,6 +44,7 @@ import torch.optim as optim
 from torch.nn.functional import cosine_similarity
 
 import torch.nn.functional as F
+from sklearn.model_selection import KFold
 
 # Initialize the GCN model and the attention network
 class GCN(torch.nn.Module):
@@ -65,6 +67,8 @@ class Attention(nn.Module):
         self.linear = nn.Linear(in_features, 1)
 
     def forward(self, x):
+        # Normalize the inputs to the attention network
+        x = F.normalize(x, p=2, dim=1)
         return F.softmax(self.linear(x), dim=0)
 
 # Initialize the GCN model
@@ -80,44 +84,113 @@ def mask_graph(data, mask_rate=0.15):
     node_mask = torch.rand(data.num_nodes) < mask_rate
     data.x[node_mask] = 0
 
-    # Create a mask for edge attributes
+    # Create a mask for edges
     edge_mask = torch.rand(data.edge_index.shape[1]) < mask_rate
-    data.edge_attr[edge_mask] = 0
+
+    # Apply the mask to the edge_index by removing the masked edges
+    data.edge_index = data.edge_index[:, ~edge_mask]
+
     return data
 # Training
 optimizer = optim.Adam(list(gcn.parameters()) + list(attention.parameters()), lr=0.001)
-for epoch in tqdm(range(5)):
-    for claim_id, graph in train_graphs_wiki_real.items():
-        optimizer.zero_grad()
-        graph1 = mask_graph(graph)
-        graph2 = mask_graph(graph)
-        emb1 = gcn(graph1)
-        emb2 = gcn(graph2)
-        attn1 = attention(emb1)
-        attn2 = attention(emb2)
-        graph_emb1 = torch.mean(attn1 * emb1, dim=0)
-        graph_emb2 = torch.mean(attn2 * emb2, dim=0)
-        pos_loss = 1-cosine_similarity(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0))
 
-        negative_samples = random.sample(list(train_graphs_wiki_real), 10)
-        max_distance = 0
-        max_distance_graph_emb = None
-        for negative_graph in negative_samples:
-            if negative_graph == graph:
-                continue
-            negative_emb = gcn(mask_graph(negative_graph))
-            negative_attn = attention(negative_emb)
-            negative_graph_emb = torch.mean(negative_attn * negative_emb, dim=0)
-            distance = torch.dist(graph_emb1, negative_graph_emb)
-            if distance > max_distance:
-                max_distance = distance
-                max_distance_graph_emb = negative_graph_emb
+# Convert pandas object to list
+train_graphs_wiki_real_list = list(train_graphs_wiki_real.values)
 
-        neg_loss = cosine_similarity(graph_emb1.unsqueeze(0), max_distance_graph_emb.unsqueeze(0))
-        loss = pos_loss + neg_loss
-        loss.backward()
-        optimizer.step()
-    print(f'Epoch {epoch} loss: {loss.item()}')
+# Cross-validation
+kf = KFold(n_splits=5)
+stop_flag = 0
+for train_index, val_index in kf.split(train_graphs_wiki_real_list):
+    train_graphs = [train_graphs_wiki_real_list[i] for i in train_index]
+    val_graphs = [train_graphs_wiki_real_list[i] for i in val_index]
+
+    # Early stopping
+    best_val_loss = float('inf')
+    patience = 3
+    patience_counter = 0
+
+    for epoch in tqdm(range(20)):
+        for graph in train_graphs:
+            optimizer.zero_grad()
+            graph1 = mask_graph(graph)
+            graph2 = mask_graph(graph)
+            emb1 = gcn(graph1)
+            emb2 = gcn(graph2)
+            attn1 = attention(emb1)
+            attn2 = attention(emb2)
+            graph_emb1 = torch.mean(attn1 * emb1, dim=0)
+            graph_emb2 = torch.mean(attn2 * emb2, dim=0)
+            pos_loss = mse_loss(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0))
+
+            negative_samples = random.sample(train_graphs, 10)
+            max_distance = 0
+            max_distance_graph_emb = None
+            for negative_graph in negative_samples:
+                if negative_graph == graph:
+                    continue
+                negative_emb = gcn(mask_graph(negative_graph))
+                negative_attn = attention(negative_emb)
+                negative_graph_emb = torch.mean(negative_attn * negative_emb, dim=0)
+                distance = torch.dist(graph_emb1, negative_graph_emb)
+                if distance > max_distance:
+                    max_distance = distance
+                    max_distance_graph_emb = negative_graph_emb
+
+            neg_loss = cosine_similarity(graph_emb1.unsqueeze(0), max_distance_graph_emb.unsqueeze(0))+1
+
+            #Calculate the loss and backpropagate
+            loss = torch.clamp(pos_loss + neg_loss, min=0)
+            loss.backward()
+            optimizer.step()
+
+        print(f'Epoch {epoch} loss: {loss.item()} poss_loss: {pos_loss.item()} neg_loss: {neg_loss.item()}')
+
+        # Validation
+        val_loss = 0
+        for graph in val_graphs:
+            emb1 = gcn(mask_graph(graph))
+            emb2 = gcn(mask_graph(graph))
+            attn1 = attention(emb1)
+            attn2 = attention(emb2)
+            graph_emb1 = torch.mean(attn1 * emb1, dim=0)
+            graph_emb2 = torch.mean(attn2 * emb2, dim=0)
+            pos_loss = mse_loss(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0))
+
+            negative_samples = random.sample(val_graphs, 10)
+            max_distance = 0
+            max_distance_graph_emb = None
+            for negative_graph in negative_samples:
+                if negative_graph == graph:
+                    continue
+                negative_emb = gcn(mask_graph(negative_graph))
+                negative_attn = attention(negative_emb)
+                negative_graph_emb = torch.mean(negative_attn * negative_emb, dim=0)
+                distance = torch.dist(graph_emb1, negative_graph_emb)
+                if distance > max_distance:
+                    max_distance = distance
+                    max_distance_graph_emb = negative_graph_emb
+
+            neg_loss = cosine_similarity(graph_emb1.unsqueeze(0), max_distance_graph_emb.unsqueeze(0)) +1
+            loss = torch.clamp(pos_loss + neg_loss, min=0)
+            val_loss += loss.item()
+        val_loss /= len(val_graphs)
+
+        print(f'Epoch {epoch} loss: {loss.item()}, val_loss: {val_loss}')
+
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            print('patience_counter', patience_counter)
+        else:
+            patience_counter += 1
+            print('patience_counter', patience_counter)
+            if patience_counter >= patience:
+                print('Early stopping')
+                stop_flag = 1
+                break
+    if stop_flag == 1:
+        break
 
 # Save the model and optimizer states
 torch.save({
@@ -129,6 +202,7 @@ torch.save({
 # Evaluation
 with torch.no_grad():
     similarities = []
+    count = 0
     for claim_id, graph in eval_graphs_wiki_real.items():
         emb1 = gcn(mask_graph(graph))
         emb2 = gcn(mask_graph(graph))
@@ -137,25 +211,33 @@ with torch.no_grad():
         graph_emb1 = torch.mean(attn1 * emb1, dim=0)
         graph_emb2 = torch.mean(attn2 * emb2, dim=0)
 
+        emb3 = gcn(graph)
+        attn3 = attention(emb3)
+        graph_emb3 = torch.mean(attn3 * emb3, dim=0)
+
         negative_samples = random.sample(list(eval_graphs_wiki_real), 10)
         max_distance = 0
         max_distance_graph_emb = None
         for negative_graph in negative_samples:
             if negative_graph == graph:
                 continue
-            negative_emb = gcn(mask_graph(negative_graph))
+            negative_emb = gcn(negative_graph)
             negative_attn = attention(negative_emb)
             negative_graph_emb = torch.mean(negative_attn * negative_emb, dim=0)
             distance = torch.dist(graph_emb1, negative_graph_emb)
             if distance > max_distance:
                 max_distance = distance
                 max_distance_graph_emb = negative_graph_emb
-        print('distance:', distance)
+        #print('distance:', distance)
         
-        simi = cosine_similarity(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0))
-        semi = cosine_similarity(graph_emb1.unsqueeze(0), max_distance_graph_emb.unsqueeze(0))
+        simi = cosine_similarity(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0)) + 1
+        semi = cosine_similarity(graph_emb3.unsqueeze(0), max_distance_graph_emb.unsqueeze(0)) + 1
 
+        if simi > semi:
+            count += 1
+        
         print('simi:', simi, 'semi:', semi)
 
         similarities.append(cosine_similarity(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0)).mean().item())
     print(f'Average similarity: {sum(similarities) / len(similarities)}')
+    print('acc:', count/len(similarities))

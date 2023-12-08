@@ -134,29 +134,19 @@ with open(args.input, 'r') as f:
         # process text
         for sentence_type in ['wiki', 'response']:
             # Use SpaCy to parse the entire text
-
-            doc = nlp(data[sentence_type])
+            text = data[sentence_type].replace('\"', '')  # Remove all \" symbols
+            text = data[sentence_type].replace('-RSB-"', '')  # Remove all \" symbols
+            text = data[sentence_type].replace('-PRB-"', '')  # Remove all \" symbols
+            text = data[sentence_type].replace('-RRB-"', '')  # Remove all \" symbols
+            text = data[sentence_type].replace('-LSB-"', '')  # Remove all \" symbols
+            doc = nlp(text)
 
             for sent in doc.sents:  # iterate over sentences
                 entities1, entities2 = get_entities(sent.text)
+                if entities1 == '' or entities2 == '':
+                    continue
                 relation = get_relation(sent.text)
                 graph[claim_id][sentence_type].append((entities1, entities2, relation))
-
-            # # Extract the entities and relationships
-            # for entity in doc.ents:
-            #     for token in entity.subtree:
-            #         # Include more dependency types
-            #         if token.dep_ in ('attr', 'dobj', 'pobj', 'nsubj', 'prep', 'ccomp', 'xcomp', 'acomp', 
-            #                             'advcl', 'relcl', 'appos', 'amod'):
-            #             subjects = [w for w in token.head.lefts if w.dep_ in ('attr', 'dobj', 'pobj', 'nsubj', 'prep', 'ccomp', 'xcomp', 'acomp', 
-            #                             'advcl', 'relcl', 'appos', 'amod')]
-            #             for subject in subjects:
-            #                 # If the subject is 'which' or 'that', use the head of the subject as the node
-            #                 # if subject.text.lower() in ('which', 'that', 'who', 'whom', 'whose', 'where', 'when', 'why', 'how',
-            #                 #                             'Who', 'Which', 'Whom', 'Whose', 'Where', 'When', 'Why', 'How','He','She','It','They','he','she','it','they'):
-            #                 #     if subject.head != subject:
-            #                 #         subject = subject.head
-            #                 graph[claim_id][sentence_type].append((subject.text, entity.text, token.head.text))
 
 
 # Write the nodes and edges to two separate CSV files
@@ -168,52 +158,3 @@ for sentence_type in ['wiki', 'response']:
             for edge in graph[claim_id][sentence_type]:
                 writer.writerow([claim_id, claim, sentence_type, edge[0], edge[1], edge[2]])
 
-
-##########################################
-##generate graph embedding##
-
-from karateclub import Graph2Vec
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.model_selection import train_test_split
-from networkx import from_pandas_edgelist, DiGraph
-import networkx as nx
-import pandas as pd
-
-# Load the knowledge graphs
-graph_response_df = pd.read_csv('graph_response_'+args.input+'.csv')
-graph_wiki_df = pd.read_csv('graph_wiki_'+args.input+'.csv')
-
-# Convert the dataframes into a list of directed graphs
-graphs_response = [from_pandas_edgelist(df, 'Node1', 'Node2', edge_attr='Label', create_using=DiGraph()) for _, df in graph_response_df.groupby('Claim ID')]
-graphs_wiki = [from_pandas_edgelist(df, 'Node1', 'Node2', edge_attr='Label', create_using=DiGraph()) for _, df in graph_wiki_df.groupby('Claim ID')]
-
-# Combine the response and wiki graphs and split them into training, validation, and test sets
-graphs_train_response, graphs_eval_response = train_test_split(graphs_response, test_size=0.2, random_state=42)
-graphs_train_wiki, graphs_eval_wiki = train_test_split(graphs_wiki, test_size=0.2, random_state=42)
-
-graph_train = graphs_train_response + graphs_train_wiki
-graph_eval = graphs_eval_response + graphs_eval_wiki
-
-def reindex_graph(graph):
-    mapping = {node: i for i, node in enumerate(graph.nodes())}
-    return nx.relabel_nodes(graph, mapping)
-
-graph_train = [reindex_graph(graph) for graph in graph_train]
-graph_eval = [reindex_graph(graph) for graph in graph_eval]
-
-# Train the Graph2Vec model on the training set
-model = Graph2Vec(dimensions=128)
-model.fit(graph_train)
-
-# Get the embeddings of the graphs in the training set
-embeddings_train = model.get_embedding()
-
-# Get the embeddings of the graphs in the validation and test sets
-embeddings_val = model.transform(graph_eval)
-
-# Calculate the cosine similarity between the embeddings for the same claim ID
-similarities = cosine_similarity(embeddings_train[:len(graphs_train_response)], embeddings_train[len(graphs_train_response):])
-similarities_eval = cosine_similarity(embeddings_train[:len(graphs_eval_response)], embeddings_train[len(graphs_eval_response):])
-
-print('Similarity: %.3f' % similarities.mean())
-print('Eval Similarity: %.3f' % similarities_eval.mean())

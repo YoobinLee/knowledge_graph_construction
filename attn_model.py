@@ -8,15 +8,21 @@ from torch.nn import CosineSimilarity
 import torch.nn as nn
 from sklearn.preprocessing import LabelEncoder
 import pandas as pd
+from torch.nn.functional import mse_loss
+import numpy as np
 
 ##############################################
 # Read the files
-graph_response_df = pd.read_csv('graph_response_greedy.csv')
-graph_wiki_df = pd.read_csv('graph_wiki_greedy.csv')
+graph_response_df = pd.read_csv('graph_response_sampled.csv')
+graph_wiki_df = pd.read_csv('graph_wiki_sampled.csv')
 
 # Convert node and label names to lowercase
 graph_response_df = graph_response_df.applymap(lambda s:s.lower() if type(s) == str else s)
 graph_wiki_df = graph_wiki_df.applymap(lambda s:s.lower() if type(s) == str else s)
+
+# Remove or encode symbols in 'Node1', 'Node2', and 'Label'
+graph_response_df = graph_response_df.replace({'<': 'symbol1', '%': 'symbol2', '[': 'symbol3'})
+graph_wiki_df = graph_wiki_df.replace({'<': 'symbol1', '%': 'symbol2', '[': 'symbol3'})
 
 # Combine the nodes and labels from both dataframes for fitting the LabelEncoder
 combined_nodes = pd.concat([graph_response_df['Node1'], graph_response_df['Node2'], graph_wiki_df['Node1'], graph_wiki_df['Node2']])
@@ -38,6 +44,7 @@ graph_wiki_df['Label'] = le_labels.transform(graph_wiki_df['Label'])
 eval_wiki = graph_wiki_df
 eval_response = graph_response_df
 
+##############################################
 def build_graph(df):
     G = nx.from_pandas_edgelist(df, 'Node1', 'Node2', edge_attr='Label', create_using=nx.DiGraph())
     data = from_networkx(G)
@@ -85,6 +92,22 @@ class Attention(nn.Module):
     def forward(self, x):
         return F.softmax(self.linear(x), dim=0)
 
+# Masking function
+def mask_graph(data, mask_rate=0.15):
+    # Ensure data.x is defined and is a tensor
+    if data.x is None:
+        data.x = torch.ones((data.num_nodes, 1))
+
+    # Create a mask for nodes
+    node_mask = torch.rand(data.num_nodes) < mask_rate
+    data.x[node_mask] = 0
+
+    # Create a mask for edges
+    edge_mask = torch.rand(data.edge_index.shape[1]) < mask_rate
+
+    # Apply the mask to the edge_index by removing the masked edges
+    data.edge_index = data.edge_index[:, ~edge_mask]
+
 # Initialize the GCN model
 gcn = GCN(num_features=1, num_classes=128)
 attention = Attention(in_features=128)
@@ -93,33 +116,68 @@ optimizer = optim.Adam(list(gcn.parameters()) + list(attention.parameters()), lr
 
 # Load the model and optimizer states
 checkpoint = torch.load('trained_variables.pt')
+#print("Model parameters before loading checkpoint:")
+# for param in gcn.parameters():
+#     print(param.data)
 gcn.load_state_dict(checkpoint['gcn_state_dict'])
 attention.load_state_dict(checkpoint['attention_state_dict'])
 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-
+#print("Model parameters after loading checkpoint:")
+# for param in gcn.parameters():
+#     print(param.data)
 
 # Ensure the model is in evaluation mode
 gcn.eval()
+print("Model is in training mode:", gcn.training)
 
 # Generate the graph embeddings and compare their similarity
-similarities = []
+distances = []
 for claim_id, graph_wiki in tqdm(eval_graphs_wiki.items()):
     if claim_id in eval_graphs_response:
         # Generate the graph embeddings
+        #print("Input to GCN model:", graph_wiki,'claim id',claim_id)
         graph_wiki_embedding = gcn(graph_wiki)
+        #print("Output of GCN model:", graph_wiki_embedding,'claim id',claim_id)
         graph_response_embedding = gcn(eval_graphs_response[claim_id])
 
         # Apply the attention model to the embeddings
+        print("Input to attention network attn1:", graph_wiki_embedding)
         attn1 = attention(graph_wiki_embedding)
+        print("Output of attention network attn1:", attn1)
+        print("Input to attention network attn2:", graph_response_embedding)
         attn2 = attention(graph_response_embedding)
+        print("Output of attention network attn2:", attn2)
 
-        #mean
+        #Compute the weighted average of the embeddings
         graph_wiki_embedding = torch.mean(attn1*graph_wiki_embedding, dim=0)
         graph_response_embedding = torch.mean(attn2*graph_response_embedding, dim=0)
-        # Compute the cosine similarity of the embeddings
-        simi = cosine_similarity(graph_wiki_embedding.unsqueeze(0), graph_response_embedding.unsqueeze(0)).mean().item()
-        similarities.append(simi)
 
-# Compute the average similarity
-average_similarity = sum(similarities) / len(similarities)
-print('Average similarity:', average_similarity)
+        # # Sample 3 random graphs from the array
+        # negative_samples = np.random.choice(eval_graphs_response, 3, replace=False)
+        # max_distance = 0
+        # max_distance_graph_emb = None
+        # for negative_graph in negative_samples:
+        #     if torch.equal(negative_graph.x, graph_wiki.x):
+        #         continue
+        #     negative_emb = gcn(negative_graph)
+        #     negative_attn = attention(negative_emb)
+        #     negative_graph_emb = torch.mean(negative_attn * negative_emb, dim=0)
+        #     distance = torch.dist(graph_wiki_embedding, negative_graph_emb)
+        #     if distance > max_distance:
+        #         max_distance = distance
+        #         max_distance_graph_emb = negative_graph_emb
+
+        # print("graph_wiki_embedding in hexadecimal:", graph_wiki_embedding)
+        # print("graph_response_embedding in hexadecimal:", graph_response_embedding)
+
+        # Compute the Euclidean distance of the embeddings
+        dist = torch.dist(graph_wiki_embedding, graph_response_embedding).item()
+        dist = cosine_similarity(graph_wiki_embedding.unsqueeze(0), graph_response_embedding.unsqueeze(0)).item()+1
+        # semi = cosine_similarity(graph_wiki_embedding.unsqueeze(0), max_distance_graph_emb.unsqueeze(0)) + 1
+        # #print('dist',dist)
+        # print('semi',semi)
+        distances.append(dist)
+
+# Compute the average distance
+average_distance = sum(distances) / len(distances)
+print('Average distance:', average_distance)
