@@ -37,7 +37,6 @@ def build_graph(df):
 train_graphs_wiki_real = train_wiki_real.groupby('Claim ID').apply(build_graph)
 eval_graphs_wiki_real = eval_wiki_real.groupby('Claim ID').apply(build_graph)
 
-
 ##############################################
 import random
 import torch.optim as optim
@@ -61,15 +60,30 @@ class GCN(torch.nn.Module):
         x = self.conv2(x, edge_index)
         return x
     
+# class Attention(nn.Module):
+#     def __init__(self, in_features, num_heads=8):
+#         super(Attention, self).__init__()
+#         self.num_heads = num_heads
+#         self.linear = nn.ModuleList([nn.Linear(in_features, 1) for _ in range(num_heads)])
+#         self.leakyrelu = nn.LeakyReLU()
+
+#     def forward(self, x):
+#         # Normalize the inputs to the attention network
+#         x = F.normalize(x, p=2, dim=1)
+#         attns = [F.softmax(self.leakyrelu(linear(x)), dim=0) for linear in self.linear]
+#         attn = torch.mean(torch.stack(attns), dim=0)
+#         return attn
+
 class Attention(nn.Module):
     def __init__(self, in_features):
         super(Attention, self).__init__()
-        self.linear = nn.Linear(in_features, 1)
+        self.in_features = in_features
+        # rest of your code
 
     def forward(self, x):
-        # Normalize the inputs to the attention network
-        x = F.normalize(x, p=2, dim=1)
-        return F.softmax(self.linear(x), dim=0)
+        # Compute uniform attention scores
+        attn = torch.ones_like(x) / x.size(0)
+        return attn
 
 # Initialize the GCN model
 gcn = GCN(num_features=1, num_classes=128)
@@ -118,11 +132,11 @@ for train_index, val_index in kf.split(train_graphs_wiki_real_list):
             emb2 = gcn(graph2)
             attn1 = attention(emb1)
             attn2 = attention(emb2)
-            graph_emb1 = torch.mean(attn1 * emb1, dim=0)
-            graph_emb2 = torch.mean(attn2 * emb2, dim=0)
+            graph_emb1 = torch.sum(attn1 * emb1, dim=0)
+            graph_emb2 = torch.sum(attn2 * emb2, dim=0)
             pos_loss = mse_loss(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0))
 
-            negative_samples = random.sample(train_graphs, 10)
+            negative_samples = random.sample(train_graphs, 3)
             max_distance = 0
             max_distance_graph_emb = None
             for negative_graph in negative_samples:
@@ -130,7 +144,7 @@ for train_index, val_index in kf.split(train_graphs_wiki_real_list):
                     continue
                 negative_emb = gcn(mask_graph(negative_graph))
                 negative_attn = attention(negative_emb)
-                negative_graph_emb = torch.mean(negative_attn * negative_emb, dim=0)
+                negative_graph_emb = torch.sum(negative_attn * negative_emb, dim=0)
                 distance = torch.dist(graph_emb1, negative_graph_emb)
                 if distance > max_distance:
                     max_distance = distance
@@ -152,13 +166,12 @@ for train_index, val_index in kf.split(train_graphs_wiki_real_list):
             emb2 = gcn(mask_graph(graph))
             attn1 = attention(emb1)
             attn2 = attention(emb2)
-            graph_emb1 = torch.mean(attn1 * emb1, dim=0)
-            graph_emb2 = torch.mean(attn2 * emb2, dim=0)
+            graph_emb1 = torch.sum(attn1 * emb1, dim=0)
+            graph_emb2 = torch.sum(attn2 * emb2, dim=0)
             pos_loss = mse_loss(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0))
 
-            negative_samples = random.sample(val_graphs, 10)
+            negative_samples = random.sample(val_graphs, 3)
             max_distance = 0
-            max_distance_graph_emb = None
             for negative_graph in negative_samples:
                 if negative_graph == graph:
                     continue
@@ -169,6 +182,8 @@ for train_index, val_index in kf.split(train_graphs_wiki_real_list):
                 if distance > max_distance:
                     max_distance = distance
                     max_distance_graph_emb = negative_graph_emb
+                else:
+                    max_distance_graph_emb = torch.zeros_like(graph_emb1)
 
             neg_loss = cosine_similarity(graph_emb1.unsqueeze(0), max_distance_graph_emb.unsqueeze(0)) +1
             loss = torch.clamp(pos_loss + neg_loss, min=0)
@@ -208,14 +223,14 @@ with torch.no_grad():
         emb2 = gcn(mask_graph(graph))
         attn1 = attention(emb1)
         attn2 = attention(emb2)
-        graph_emb1 = torch.mean(attn1 * emb1, dim=0)
-        graph_emb2 = torch.mean(attn2 * emb2, dim=0)
+        graph_emb1 = torch.sum(attn1 * emb1, dim=0)
+        graph_emb2 = torch.sum(attn2 * emb2, dim=0)
 
         emb3 = gcn(graph)
         attn3 = attention(emb3)
-        graph_emb3 = torch.mean(attn3 * emb3, dim=0)
+        graph_emb3 = torch.sum(attn3 * emb3, dim=0)
 
-        negative_samples = random.sample(list(eval_graphs_wiki_real), 10)
+        negative_samples = random.sample(list(eval_graphs_wiki_real), 3)
         max_distance = 0
         max_distance_graph_emb = None
         for negative_graph in negative_samples:
@@ -223,11 +238,13 @@ with torch.no_grad():
                 continue
             negative_emb = gcn(negative_graph)
             negative_attn = attention(negative_emb)
-            negative_graph_emb = torch.mean(negative_attn * negative_emb, dim=0)
+            negative_graph_emb = torch.sum(negative_attn * negative_emb, dim=0)
             distance = torch.dist(graph_emb1, negative_graph_emb)
             if distance > max_distance:
                 max_distance = distance
                 max_distance_graph_emb = negative_graph_emb
+            else:
+                max_distance_graph_emb = torch.zeros_like(graph_emb1)
         #print('distance:', distance)
         
         simi = cosine_similarity(graph_emb1.unsqueeze(0), graph_emb2.unsqueeze(0)) + 1

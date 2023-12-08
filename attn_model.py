@@ -84,13 +84,24 @@ class GCN(torch.nn.Module):
         x = self.conv2(x, edge_index)
         return x
     
+# class Attention(nn.Module):
+#     def __init__(self, in_features):
+#         super(Attention, self).__init__()
+#         self.linear = nn.Linear(in_features, 1)
+
+#     def forward(self, x):
+#         return F.softmax(self.linear(x), dim=0)
+
 class Attention(nn.Module):
     def __init__(self, in_features):
         super(Attention, self).__init__()
-        self.linear = nn.Linear(in_features, 1)
+        self.in_features = in_features
+        # rest of your code
 
     def forward(self, x):
-        return F.softmax(self.linear(x), dim=0)
+        # Compute uniform attention scores
+        attn = torch.ones_like(x) / x.size(0)
+        return attn
 
 # Masking function
 def mask_graph(data, mask_rate=0.15):
@@ -141,16 +152,18 @@ for claim_id, graph_wiki in tqdm(eval_graphs_wiki.items()):
         graph_response_embedding = gcn(eval_graphs_response[claim_id])
 
         # Apply the attention model to the embeddings
-        print("Input to attention network attn1:", graph_wiki_embedding)
+        #print("Input to attention network attn1:", graph_wiki_embedding)
         attn1 = attention(graph_wiki_embedding)
-        print("Output of attention network attn1:", attn1)
-        print("Input to attention network attn2:", graph_response_embedding)
+        #print("Output of attention network attn1:", attn1)
+        #print("Input to attention network attn2:", graph_response_embedding)
         attn2 = attention(graph_response_embedding)
-        print("Output of attention network attn2:", attn2)
+        #print("Output of attention network attn2:", attn2)
 
         #Compute the weighted average of the embeddings
-        graph_wiki_embedding = torch.mean(attn1*graph_wiki_embedding, dim=0)
-        graph_response_embedding = torch.mean(attn2*graph_response_embedding, dim=0)
+        print("Input to weighted average:", graph_wiki_embedding, graph_response_embedding)
+        graph_wiki_embedding = torch.sum(attn1*graph_wiki_embedding, dim=0)
+        graph_response_embedding = torch.sum(attn2*graph_response_embedding, dim=0)
+        print("Output of weighted average:", graph_wiki_embedding, graph_response_embedding)
 
         # # Sample 3 random graphs from the array
         # negative_samples = np.random.choice(eval_graphs_response, 3, replace=False)

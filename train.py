@@ -158,7 +158,6 @@ for idx, (claim_id1, graph) in enumerate(train_graphs_wiki.items()):
 
         # Calculate Euclidean distance
         distance = torch.dist(graph_embeddings_wiki, graph_embeddings_response2)
-        print('######distance#####',distance)
 
         # Update max_distance and max_distance_graph_embedding if necessary
         if distance > max_distance:
