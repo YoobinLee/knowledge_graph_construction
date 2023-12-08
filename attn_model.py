@@ -38,12 +38,15 @@ graph_wiki_df['Label'] = le_labels.transform(graph_wiki_df['Label'])
 eval_wiki = graph_wiki_df
 eval_response = graph_response_df
 
-# Function to build a graph from a DataFrame
 def build_graph(df):
     G = nx.from_pandas_edgelist(df, 'Node1', 'Node2', edge_attr='Label', create_using=nx.DiGraph())
     data = from_networkx(G)
+    # Use the node IDs as node features
+    data.x = torch.tensor(list(G.nodes), dtype=torch.float).view(-1, 1)
+    # Convert edge attributes to a tensor and store them in data.edge_attr
+    edge_attrs = [G.get_edge_data(*e).get('Label', 0) for e in G.edges()]
+    data.edge_attr = torch.tensor(edge_attrs, dtype=torch.float).view(-1, 1)
     return data
-
 
 # Build the evaluation graphs
 # Replace with your actual code to build the evaluation graphs
@@ -51,79 +54,74 @@ eval_graphs_wiki = eval_wiki.groupby('Claim ID').apply(build_graph)
 eval_graphs_response = eval_response.groupby('Claim ID').apply(build_graph)
 
 ##############################################
-# Initialize cosine similarity function
-cos_sim = CosineSimilarity(dim=1)
-# Define a simple feed-forward network for computing attention scores
+import random
+import torch.optim as optim
+from torch.nn.functional import cosine_similarity
+import pandas as pd
+from tqdm import tqdm
+
+import torch.nn.functional as F
+
+# Initialize the GCN model and the attention network
+class GCN(torch.nn.Module):
+    def __init__(self, num_features, num_classes):
+        super(GCN, self).__init__()
+        self.conv1 = GCNConv(num_features, 128)
+        self.conv2 = GCNConv(128, num_classes)
+
+    def forward(self, data):
+        x, edge_index = data.x, data.edge_index
+        x = self.conv1(x, edge_index)
+        x = F.relu(x)
+        x = F.dropout(x, training=self.training)
+        x = self.conv2(x, edge_index)
+        return x
+    
 class Attention(nn.Module):
     def __init__(self, in_features):
         super(Attention, self).__init__()
-        self.fc = nn.Linear(in_features, 1)
+        self.linear = nn.Linear(in_features, 1)
 
     def forward(self, x):
-        return self.fc(x)
-# Load the trained variables
+        return F.softmax(self.linear(x), dim=0)
+
+# Initialize the GCN model
+gcn = GCN(num_features=1, num_classes=128)
+attention = Attention(in_features=128)
+# Training
+optimizer = optim.Adam(list(gcn.parameters()) + list(attention.parameters()), lr=0.001)
+
+# Load the model and optimizer states
 checkpoint = torch.load('trained_variables.pt')
-
-# Initialize the model and optimizer
-num_features_per_node = 1  # replace with actual number if nodes have features
-gcn = GCNConv(num_features_per_node, 128).to('cuda')
-attention = Attention(128).to('cuda').to('cuda')
-optimizer = optim.Adam(gcn.parameters(), lr=0.01)
-
-# Load the state dicts into the model and optimizer
-gcn.load_state_dict(checkpoint['model_state_dict'])
+gcn.load_state_dict(checkpoint['gcn_state_dict'])
 attention.load_state_dict(checkpoint['attention_state_dict'])
 optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
 
-##############################################
-# Set the model to evaluation mode
+
+# Ensure the model is in evaluation mode
 gcn.eval()
-attention.eval()
 
-# Initialize progress bar for evaluation
-pbar_eval = tqdm(total=len(eval_graphs_wiki))
+# Generate the graph embeddings and compare their similarity
+similarities = []
+for claim_id, graph_wiki in tqdm(eval_graphs_wiki.items()):
+    if claim_id in eval_graphs_response:
+        # Generate the graph embeddings
+        graph_wiki_embedding = gcn(graph_wiki)
+        graph_response_embedding = gcn(eval_graphs_response[claim_id])
 
-# Initialize counters for correct and total predictions
-sim_predictions = 0
-total_predictions = 0
+        # Apply the attention model to the embeddings
+        graph_wiki_embedding = attention(graph_wiki_embedding)
+        graph_response_embedding = attention(graph_response_embedding)
 
-# Evaluate the model
-with torch.no_grad():
-    for idx, (claim_id, graph) in enumerate(eval_graphs_wiki.items()):
-        if claim_id not in eval_graphs_response:
-            continue
+        #mean
+        graph_wiki_embedding = torch.mean(graph_wiki_embedding, dim=0)
+        graph_response_embedding = torch.mean(graph_response_embedding, dim=0)
 
-        # Check if node features exist, if not create them
-        node_features_wiki = graph.x.to('cuda') if graph.x is not None else torch.ones((graph.num_nodes, 1)).to('cuda')
-        node_features_response = eval_graphs_response[claim_id].x.to('cuda') if eval_graphs_response[claim_id].x is not None else torch.ones((eval_graphs_response[claim_id].num_nodes, 1)).to('cuda')
-        
-        # Generate node embeddings
-        node_embeddings_wiki = gcn(node_features_wiki, graph.edge_index.to('cuda'))
-        node_embeddings_response = gcn(node_features_response, eval_graphs_response[claim_id].edge_index.to('cuda'))
-        
-        # Compute attention scores
-        attention_scores_wiki = torch.nn.functional.softmax(attention(node_embeddings_wiki), dim=0)
-        attention_scores_response = torch.nn.functional.softmax(attention(node_embeddings_response), dim=0)
-        
-        # Aggregate node embeddings
-        graph_embeddings_wiki = torch.mean(attention_scores_wiki * node_embeddings_wiki, dim=0)
-        graph_embeddings_response = torch.mean(attention_scores_response * node_embeddings_response, dim=0)
-        
-        # Calculate cosine similarity
-        similarity = cos_sim(graph_embeddings_wiki.unsqueeze(0), graph_embeddings_response.unsqueeze(0))
-        
-        #print('###############wiki:',graph_embeddings_wiki,'###############response:',graph_embeddings_response)
+        print('####', graph_wiki_embedding, graph_response_embedding, '####')
+        # Compute the cosine similarity of the embeddings
+        similarity = cosine_similarity(graph_wiki_embedding.unsqueeze(0), graph_response_embedding.unsqueeze(0))
+        similarities.append(similarity.item())
 
-        # Update counters
-        total_predictions += 1
-        if claim_id % 32 == 0:
-            print(f'Claim {claim_id}, Similarity: {similarity.item()}')
-        sim_predictions += similarity.item()
-
-    # Close progress bar
-    pbar_eval.close()
-
-    print(sim_predictions)
-    # Calculate accuracy
-    accuracy = sim_predictions / total_predictions
-    print(f'Similarity Ave: {accuracy}')
+# Compute the average similarity
+average_similarity = sum(similarities) / len(similarities)
+print('Average similarity:', average_similarity)

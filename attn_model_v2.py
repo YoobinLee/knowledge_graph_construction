@@ -83,11 +83,10 @@ def mask_graph(data, mask_rate=0.15):
     # Create a mask for edge attributes
     edge_mask = torch.rand(data.edge_index.shape[1]) < mask_rate
     data.edge_attr[edge_mask] = 0
-
     return data
 # Training
 optimizer = optim.Adam(list(gcn.parameters()) + list(attention.parameters()), lr=0.001)
-for epoch in range(100):
+for epoch in tqdm(range(100)):
     for claim_id, graph in train_graphs_wiki_real.items():
         optimizer.zero_grad()
         graph1 = mask_graph(graph)
@@ -116,9 +115,15 @@ for epoch in range(100):
 
         neg_loss = cosine_similarity(graph_emb1.unsqueeze(0), max_distance_graph_emb.unsqueeze(0))
         loss = pos_loss + neg_loss
-        print('%s: %s' % (epoch, loss.item()))
         loss.backward()
         optimizer.step()
+
+# Save the model and optimizer states
+torch.save({
+    'gcn_state_dict': gcn.state_dict(),
+    'attention_state_dict': attention.state_dict(),
+    'optimizer_state_dict': optimizer.state_dict(),
+}, 'trained_variables.pt')
 
 # Evaluation
 with torch.no_grad():
